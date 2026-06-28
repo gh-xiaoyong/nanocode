@@ -14,7 +14,8 @@ func TestLoadFromWorkspaceReadsSettingsFile(t *testing.T) {
     "api_key": "file-key",
     "model": "test-model",
     "temperature": 0.4,
-    "max_tokens": 1234
+    "max_tokens": 1234,
+    "context_window": 1000000
   }
 }`)
 
@@ -38,6 +39,9 @@ func TestLoadFromWorkspaceReadsSettingsFile(t *testing.T) {
 	if cfg.MaxTokens != 1234 {
 		t.Fatalf("expected max tokens from settings file, got %d", cfg.MaxTokens)
 	}
+	if cfg.ContextWindow != 1000000 {
+		t.Fatalf("expected context window from settings file, got %d", cfg.ContextWindow)
+	}
 }
 
 func TestLoadFromWorkspaceEnvOverridesSettings(t *testing.T) {
@@ -48,7 +52,8 @@ func TestLoadFromWorkspaceEnvOverridesSettings(t *testing.T) {
     "api_key": "file-key",
     "model": "file-model",
     "temperature": 0.2,
-    "max_tokens": 2048
+    "max_tokens": 2048,
+    "context_window": 64000
   }
 }`)
 
@@ -57,6 +62,7 @@ func TestLoadFromWorkspaceEnvOverridesSettings(t *testing.T) {
 	t.Setenv("NANOCODE_MODEL", "env-model")
 	t.Setenv("NANOCODE_TEMPERATURE", "0.9")
 	t.Setenv("NANOCODE_MAX_TOKENS", "999")
+	t.Setenv("NANOCODE_CONTEXT_WINDOW", "200000")
 
 	cfg, err := LoadFromWorkspace(workspace)
 	if err != nil {
@@ -77,6 +83,9 @@ func TestLoadFromWorkspaceEnvOverridesSettings(t *testing.T) {
 	}
 	if cfg.MaxTokens != 999 {
 		t.Fatalf("expected env max tokens, got %d", cfg.MaxTokens)
+	}
+	if cfg.ContextWindow != 200000 {
+		t.Fatalf("expected env context window, got %d", cfg.ContextWindow)
 	}
 }
 

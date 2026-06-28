@@ -6,9 +6,8 @@ import (
 	"strings"
 )
 
-// WorkspacePolicy 定义当前阶段的工作区边界。
-// 阶段 1.5 先把“默认只允许访问当前项目根目录内路径”收敛成显式对象，
-// 为后续读写分级、权限确认和仓库外授权打基础。
+// WorkspacePolicy 定义当前项目的工作区边界。
+// 所有文件工具都先通过它解析路径，默认禁止访问项目根目录之外的文件。
 type WorkspacePolicy struct {
 	rootDir string
 }
@@ -27,6 +26,7 @@ func (p *WorkspacePolicy) RootDir() string {
 }
 
 func (p *WorkspacePolicy) ResolvePath(userPath string) (string, error) {
+	// 空路径默认指向 workspace root，便于 ls/grep/glob 这类工具省略 path。
 	targetPath := strings.TrimSpace(userPath)
 	if targetPath == "" {
 		targetPath = "."
@@ -47,6 +47,7 @@ func (p *WorkspacePolicy) ResolvePath(userPath string) (string, error) {
 	}
 
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		// 默认禁止仓库外读写；后续如果支持仓库外授权，应从这里扩展。
 		return "", fmt.Errorf("path %q escapes workspace root %q", userPath, p.rootDir)
 	}
 

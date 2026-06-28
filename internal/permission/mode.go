@@ -14,6 +14,7 @@ const (
 )
 
 func ParseMode(raw string) (Mode, error) {
+	// mode 是用户可见的执行策略入口，统一在这里解析，避免各层散落字符串判断。
 	mode := Mode(strings.TrimSpace(raw))
 	if mode == "" {
 		return ModeDefault, nil

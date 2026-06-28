@@ -88,6 +88,7 @@ func newGlobTool(workspace *permission.WorkspacePolicy) (einotool.BaseTool, erro
 }
 
 func collectGlobMatches(workspaceRoot string, searchRoot string, pattern string) ([]globMatch, error) {
+	// doublestar 提供 ** 支持；这里再过滤目录，只把文件路径返回给模型。
 	matches, err := doublestar.FilepathGlob(filepath.Join(searchRoot, filepath.FromSlash(pattern)))
 	if err != nil {
 		return nil, fmt.Errorf("glob files: %w", err)

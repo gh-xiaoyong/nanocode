@@ -12,6 +12,7 @@ import (
 
 	einotool "github.com/cloudwego/eino/components/tool"
 
+	"nanocode/internal/checkpoint"
 	"nanocode/internal/permission"
 )
 
@@ -509,6 +510,159 @@ func TestGitStatusToolReportsBranchAndDiffSummary(t *testing.T) {
 	}
 }
 
+func TestWriteFileToolWritesWorkspaceFile(t *testing.T) {
+	rootDir := t.TempDir()
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	baseTool, err := newWriteFileTool(workspace, checkpoint.NewManager())
+	if err != nil {
+		t.Fatalf("create write_file tool: %v", err)
+	}
+	invokableTool := mustInvokableTool(t, baseTool)
+
+	output, err := invokableTool.InvokableRun(context.Background(), `{"path":"hello.txt","content":"hello nanocode"}`)
+	if err != nil {
+		t.Fatalf("invoke write_file tool: %v", err)
+	}
+
+	content, err := os.ReadFile(filepath.Join(rootDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(content) != "hello nanocode" {
+		t.Fatalf("unexpected written content: %q", string(content))
+	}
+	if !strings.Contains(output, "checkpoint created") {
+		t.Fatalf("expected checkpoint message, got %q", output)
+	}
+}
+
+func TestWriteFileToolRejectsWorkspaceEscape(t *testing.T) {
+	rootDir := t.TempDir()
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	baseTool, err := newWriteFileTool(workspace, checkpoint.NewManager())
+	if err != nil {
+		t.Fatalf("create write_file tool: %v", err)
+	}
+	invokableTool := mustInvokableTool(t, baseTool)
+
+	_, err = invokableTool.InvokableRun(context.Background(), `{"path":"../outside.txt","content":"nope"}`)
+	if err == nil {
+		t.Fatal("expected write_file to reject workspace escape")
+	}
+}
+
+func TestEditFileToolReplacesSingleMatch(t *testing.T) {
+	rootDir := t.TempDir()
+	filePath := filepath.Join(rootDir, "hello.txt")
+	if err := os.WriteFile(filePath, []byte("hello old value\n"), 0o644); err != nil {
+		t.Fatalf("write fixture file: %v", err)
+	}
+
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	baseTool, err := newEditFileTool(workspace, checkpoint.NewManager())
+	if err != nil {
+		t.Fatalf("create edit_file tool: %v", err)
+	}
+	invokableTool := mustInvokableTool(t, baseTool)
+
+	output, err := invokableTool.InvokableRun(context.Background(), `{"path":"hello.txt","old_string":"old value","new_string":"new value"}`)
+	if err != nil {
+		t.Fatalf("invoke edit_file tool: %v", err)
+	}
+
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read edited file: %v", err)
+	}
+	if string(content) != "hello new value\n" {
+		t.Fatalf("unexpected edited content: %q", string(content))
+	}
+	if !strings.Contains(output, "1 replacement") {
+		t.Fatalf("expected replacement count, got %q", output)
+	}
+}
+
+func TestEditFileToolErrorsWhenOldStringMissing(t *testing.T) {
+	rootDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootDir, "hello.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write fixture file: %v", err)
+	}
+
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	baseTool, err := newEditFileTool(workspace, checkpoint.NewManager())
+	if err != nil {
+		t.Fatalf("create edit_file tool: %v", err)
+	}
+	invokableTool := mustInvokableTool(t, baseTool)
+
+	_, err = invokableTool.InvokableRun(context.Background(), `{"path":"hello.txt","old_string":"missing","new_string":"new"}`)
+	if err == nil {
+		t.Fatal("expected edit_file to fail when old_string is missing")
+	}
+}
+
+func TestEditFileToolErrorsOnMultipleMatchesByDefault(t *testing.T) {
+	rootDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootDir, "hello.txt"), []byte("same same"), 0o644); err != nil {
+		t.Fatalf("write fixture file: %v", err)
+	}
+
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	baseTool, err := newEditFileTool(workspace, checkpoint.NewManager())
+	if err != nil {
+		t.Fatalf("create edit_file tool: %v", err)
+	}
+	invokableTool := mustInvokableTool(t, baseTool)
+
+	_, err = invokableTool.InvokableRun(context.Background(), `{"path":"hello.txt","old_string":"same","new_string":"other"}`)
+	if err == nil {
+		t.Fatal("expected edit_file to fail on multiple matches by default")
+	}
+}
+
+func TestBashToolTimesOut(t *testing.T) {
+	rootDir := t.TempDir()
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	baseTool, err := newBashTool(workspace)
+	if err != nil {
+		t.Fatalf("create bash tool: %v", err)
+	}
+	invokableTool := mustInvokableTool(t, baseTool)
+
+	command := `Start-Sleep -Seconds 2`
+	if os.PathSeparator == '/' {
+		command = `sleep 2`
+	}
+	_, err = invokableTool.InvokableRun(context.Background(), fmt.Sprintf(`{"command":%q,"timeout_seconds":1}`, command))
+	if err == nil {
+		t.Fatal("expected bash command to time out")
+	}
+}
+
 func TestParseMode(t *testing.T) {
 	mode, err := permission.ParseMode("plan")
 	if err != nil {
@@ -517,6 +671,16 @@ func TestParseMode(t *testing.T) {
 	if mode != permission.ModePlan {
 		t.Fatalf("unexpected mode: %q", mode)
 	}
+}
+
+func mustInvokableTool(t *testing.T, baseTool einotool.BaseTool) einotool.InvokableTool {
+	t.Helper()
+
+	invokableTool, ok := baseTool.(einotool.InvokableTool)
+	if !ok {
+		t.Fatal("tool should implement InvokableTool")
+	}
+	return invokableTool
 }
 
 func runGitTestCommand(t *testing.T, workdir string, args ...string) {

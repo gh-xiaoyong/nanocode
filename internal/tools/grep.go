@@ -36,8 +36,7 @@ func newGrepTool(workspace *permission.WorkspacePolicy) (einotool.BaseTool, erro
 }
 
 func newGrepToolWithBackend(workspace *permission.WorkspacePolicy, backend grepBackend) (einotool.BaseTool, error) {
-	// grep 是阶段 2 的第一块仓库搜索能力。
-	// 现在底层优先走 ripgrep，提高大仓库下的搜索性能；
+	// grep 是阶段 2 的仓库搜索能力；底层优先走 ripgrep，提高大仓库下的搜索性能。
 	// 如果本机没有 rg 或执行失败，再回退到纯 Go 实现，保证工具接口稳定可用。
 	return toolu.InferTool(
 		"grep",
@@ -54,8 +53,7 @@ func newGrepToolWithBackend(workspace *permission.WorkspacePolicy, backend grepB
 				return "", err
 			}
 
-			maxResults := input.MaxResults
-			if maxResults <= 0 {
+			if input.MaxResults <= 0 {
 				input.MaxResults = defaultGrepMaxResults
 			}
 
@@ -76,6 +74,7 @@ func runBestEffortGrep(workspace *permission.WorkspacePolicy, resolvedPath strin
 }
 
 func runRipgrep(workspace *permission.WorkspacePolicy, resolvedPath string, input grepInput) (string, error) {
+	// rg 输出 JSON 后再转回统一文本格式，避免模型感知到底层实现差异。
 	if _, err := exec.LookPath("rg"); err != nil {
 		return "", fmt.Errorf("ripgrep not available: %w", err)
 	}

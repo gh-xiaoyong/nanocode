@@ -24,8 +24,7 @@ type readFileInput struct {
 }
 
 func newReadFileTool(workspace *permission.WorkspacePolicy) (einotool.BaseTool, error) {
-	// read_file 是阶段 1 最关键的只读工具。
-	// 它按需分段读取文件，避免一次性把大文件塞进上下文。
+	// read_file 按需分段读取文件，避免一次性把大文件塞进上下文。
 	return toolu.InferTool(
 		"read_file",
 		"按需读取工作区内指定文件的文本内容，默认读取前 2000 行；可用 offset 和 limit 分段读取更靠后的内容。",
@@ -56,6 +55,7 @@ func newReadFileTool(workspace *permission.WorkspacePolicy) (einotool.BaseTool, 
 }
 
 func readFileWindow(filePath string, offset int, limit int) (string, error) {
+	// offset 使用 1-based 行号，和用户/模型在提示里讨论文件行号的方式一致。
 	startLine := offset
 	if startLine < 1 {
 		startLine = 1

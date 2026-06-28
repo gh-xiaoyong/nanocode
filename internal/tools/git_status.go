@@ -28,6 +28,7 @@ func newGitStatusTool(workspace *permission.WorkspacePolicy) (einotool.BaseTool,
 }
 
 func buildGitStatusSummary(ctx context.Context, workspaceRoot string) (string, error) {
+	// 这里只读取 status 和 diff stat，不做 add/commit/checkout 等会改变仓库状态的操作。
 	status, err := runGitCommand(ctx, workspaceRoot, "status", "--short", "--branch")
 	if err != nil {
 		return "", err
