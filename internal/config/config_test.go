@@ -1,0 +1,111 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLoadFromWorkspaceReadsSettingsFile(t *testing.T) {
+	workspace := t.TempDir()
+	writeFile(t, filepath.Join(workspace, settingsFileName), `{
+  "model": {
+    "base_url": "https://example.com/v1",
+    "api_key": "file-key",
+    "model": "test-model",
+    "temperature": 0.4,
+    "max_tokens": 1234
+  }
+}`)
+
+	cfg, err := LoadFromWorkspace(workspace)
+	if err != nil {
+		t.Fatalf("LoadFromWorkspace() error = %v", err)
+	}
+
+	if cfg.BaseURL != "https://example.com/v1" {
+		t.Fatalf("expected base url from settings file, got %q", cfg.BaseURL)
+	}
+	if cfg.APIKey != "file-key" {
+		t.Fatalf("expected api key from settings file, got %q", cfg.APIKey)
+	}
+	if cfg.Model != "test-model" {
+		t.Fatalf("expected model from settings file, got %q", cfg.Model)
+	}
+	if cfg.Temperature != 0.4 {
+		t.Fatalf("expected temperature from settings file, got %v", cfg.Temperature)
+	}
+	if cfg.MaxTokens != 1234 {
+		t.Fatalf("expected max tokens from settings file, got %d", cfg.MaxTokens)
+	}
+}
+
+func TestLoadFromWorkspaceEnvOverridesSettings(t *testing.T) {
+	workspace := t.TempDir()
+	writeFile(t, filepath.Join(workspace, settingsFileName), `{
+  "model": {
+    "base_url": "https://file.example/v1",
+    "api_key": "file-key",
+    "model": "file-model",
+    "temperature": 0.2,
+    "max_tokens": 2048
+  }
+}`)
+
+	t.Setenv("NANOCODE_BASE_URL", "https://env.example/v1")
+	t.Setenv("NANOCODE_API_KEY", "env-key")
+	t.Setenv("NANOCODE_MODEL", "env-model")
+	t.Setenv("NANOCODE_TEMPERATURE", "0.9")
+	t.Setenv("NANOCODE_MAX_TOKENS", "999")
+
+	cfg, err := LoadFromWorkspace(workspace)
+	if err != nil {
+		t.Fatalf("LoadFromWorkspace() error = %v", err)
+	}
+
+	if cfg.BaseURL != "https://env.example/v1" {
+		t.Fatalf("expected env base url, got %q", cfg.BaseURL)
+	}
+	if cfg.APIKey != "env-key" {
+		t.Fatalf("expected env api key, got %q", cfg.APIKey)
+	}
+	if cfg.Model != "env-model" {
+		t.Fatalf("expected env model, got %q", cfg.Model)
+	}
+	if cfg.Temperature != 0.9 {
+		t.Fatalf("expected env temperature, got %v", cfg.Temperature)
+	}
+	if cfg.MaxTokens != 999 {
+		t.Fatalf("expected env max tokens, got %d", cfg.MaxTokens)
+	}
+}
+
+func TestLoadFromWorkspaceUsesAPIKeyEnvFromSettings(t *testing.T) {
+	workspace := t.TempDir()
+	writeFile(t, filepath.Join(workspace, settingsFileName), `{
+  "model": {
+    "base_url": "https://example.com/v1",
+    "api_key_env": "PROJECT_MODEL_KEY",
+    "model": "test-model"
+  }
+}`)
+
+	t.Setenv("PROJECT_MODEL_KEY", "env-from-settings")
+
+	cfg, err := LoadFromWorkspace(workspace)
+	if err != nil {
+		t.Fatalf("LoadFromWorkspace() error = %v", err)
+	}
+
+	if cfg.APIKey != "env-from-settings" {
+		t.Fatalf("expected api key from api_key_env, got %q", cfg.APIKey)
+	}
+}
+
+func writeFile(t *testing.T, path string, content string) {
+	t.Helper()
+
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write file %s: %v", path, err)
+	}
+}

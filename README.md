@@ -4,9 +4,13 @@
 
 目标不是复刻全部功能，而是把 Claude Code 的**核心机制**做对：带工具的 Agent 循环、权限/沙箱控制面、上下文与记忆管理、可恢复执行。
 
+协作约定见：[AGENT.md](D:/projects/nanocode/AGENT.md)
+学习记录见：[docs/LEARNING.md](D:/projects/nanocode/docs/LEARNING.md)
+编码约定见：[docs/ENCODING.md](D:/projects/nanocode/docs/ENCODING.md)
+
 ## 核心理念
 
-抛开终端 UI 的花哨，一个编码 Agent 的本质是：
+即使交互载体仍然是终端，一个编码 Agent 的本质也不在于 UI 是否花哨，而在于：
 
 **带工具的 Agent 循环 + 权限/沙箱控制面 + 上下文/记忆管理 + 可恢复执行 + 可扩展工具生态**
 
@@ -31,7 +35,8 @@ Eino 给你**发动机**（循环 + 工具 + 模型抽象），你造**车身**�
 | 统一消息 / 工具调用结构 (`schema.Message`) | Eino 现成 |
 | 模型抽象 + 流式 (`components/model`, ToolCallingChatModel) | Eino 现成 |
 | 工具定义（Go 函数 + struct tag 自动生成 JSON Schema，`utils/tool.InferTool`） | Eino 现成 |
-| ReAct Agent 主循环 (`flow/agent/react`) | Eino 现成 |
+| 模型抽象、工具 schema、消息结构 | Eino 现成 |
+| 显式 Agent 主循环（messages → model → tool call → tool result） | 自研 |
 | 执行中断 / 恢复（权限闸门基础，`compose.Graph` interrupt / checkpoint） | Eino 提供机制 |
 | 流式渲染 / 日志 / token 统计 (`callbacks`) | Eino 提供钩子 |
 | **权限策略 / 沙箱边界** | 自研 |
@@ -45,7 +50,7 @@ Eino 给你**发动机**（循环 + 工具 + 模型抽象），你造**车身**�
 
 ## 项目结构
 
-```
+```text
 nanocode/
 ├── cmd/nanocode/main.go          # 入口：解析参数、初始化、启动 REPL
 ├── internal/
@@ -100,8 +105,8 @@ nanocode/
 **阶段 0 — 骨架与单轮对话**
 跑通 `go mod` + Eino 依赖，先接 OpenAI 兼容接口（`base_url`、`api_key`、`model` 三件套），实现"输入一句 → 流式打印回答"。验证模型连通和流式渲染，还没有工具。
 
-**阶段 1 — 接入 ReAct Agent + 第一个只读工具**
-用 `react.NewAgent` 组装，先只给 `read_file`、`ls` 这类只读、零风险工具。验证完整循环：模型能自己决定读文件并基于内容回答。只读工具先行，可在没有权限系统时安全地把循环调通。
+**阶段 1 — 接入显式 Agent 核心循环 + 第一个只读工具**
+用 Eino 的模型、消息和工具抽象，但在项目内显式维护 `messages[] → model → tool call → tool result → messages[]` 循环。先只给 `read_file`、`ls` 这类只读、零风险工具。验证完整循环：模型能自己决定读文件并基于内容回答。只读工具先行，可在没有权限系统时安全地把循环调通。
 
 **阶段 1.5 — Plan mode 与工作区边界**
 加入执行模式：默认模式可按策略申请写入，plan mode 只能读文件、搜索和分析。所有文件工具先接入 workspace/path policy，默认限制在当前项目根内，仓库外读写必须单独授权。
@@ -137,24 +142,62 @@ nanocode/
 2. **权限粒度**：不能只按"工具类型"判断。MVP 可先做到工具级确认，但策略结构要支持参数级判断：路径是否越界、bash 是否有副作用、是否读敏感文件、是否访问网络。
 3. **默认执行模式**：建议提供 `default`、`plan`、`accept-edits` 三种。`plan` 禁止写入和有副作用命令；`accept-edits` 可自动接受普通文件编辑，但 bash 仍需确认。
 4. **checkpoint 粒度**：MVP 先做文件级快照，记录每次工具调用修改了哪些文件；后续再做会话级 checkpoint 和多步回滚。
-5. **何时下沉到 graph**：`react.NewAgent` 最省事，但权限 interrupt、checkpoint、resume、工具输出治理用底层 `compose.Graph` 更自由。建议阶段 0–2 用 ReAct，阶段 3 评估是否下沉到 graph。
+5. **何时下沉到 graph**：当前已经把核心 tool loop 显式写在项目内；后续如果权限 interrupt、checkpoint、resume 需要更强的可恢复编排，再评估是否下沉到 Eino `compose.Graph`。
 
 ## OpenAI 兼容模型配置
 
-MVP 默认只要求 OpenAI-compatible chat completions / tool calling 能力：
+MVP 默认只要求 OpenAI-compatible chat completions / tool calling 能力。
 
-```yaml
-model:
-  provider: openai-compatible
-  base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
-  model: gpt-4.1
-  temperature: 0.2
-  max_tokens: 4096
+当前推荐在**项目根目录**维护真实配置文件 `settings.json`，并参考模板 `settings-example.json`：
+
+```json
+{
+  "model": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "your-api-key-here",
+    "model": "gpt-4.1",
+    "temperature": 0.2,
+    "max_tokens": 4096
+  }
+}
 ```
 
-本地或第三方兼容服务只需要替换 `base_url`、`api_key_env` 和 `model`。`model/factory.go` 不直接绑定具体厂商，内部只依赖"支持流式输出 + tool calling"的能力。
+如果你不想把真实 key 写死在文件里，也可以改成：
+
+```json
+{
+  "model": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key_env": "NANOCODE_API_KEY",
+    "model": "gpt-4.1",
+    "temperature": 0.2,
+    "max_tokens": 4096
+  }
+}
+```
+
+配置优先级当前是：
+
+1. 环境变量
+2. 项目根 `settings.json`
+3. 默认值（仅 `base_url`、`temperature`、`max_tokens` 有默认值）
+
+支持的环境变量包括：
+
+- `NANOCODE_API_KEY`
+- `NANOCODE_MODEL`
+- `NANOCODE_BASE_URL`
+- `NANOCODE_TEMPERATURE`
+- `NANOCODE_MAX_TOKENS`
+
+以及兼容的 `OPENAI_*` 变量。
+
+仓库已通过 `.gitignore` 忽略 `settings.json`，所以可以本地保存真实配置；`settings-example.json` 用于分发模板。本地或第三方兼容服务只需要替换 `base_url` 和 `model`。`model/factory.go` 不直接绑定具体厂商，内部只依赖"支持流式输出 + tool calling"的能力。
 
 ## 状态
 
-📋 规划阶段。代码尚未开始。
+- 当前代码已完成**阶段 2**
+- `grep` / `glob` / `git_status` 已接入
+- 下一步进入**阶段 3：写操作 + 权限闸门**
+- `README` 继续承担路线图 / list 角色
+- 具体实现细节请看 [docs/LEARNING.md](D:/projects/nanocode/docs/LEARNING.md)
