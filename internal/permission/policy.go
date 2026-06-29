@@ -27,6 +27,7 @@ type Request struct {
 	Arguments string
 	Kind      ToolKind
 	Risk      string
+	Preview   string
 }
 
 type Confirmer interface {

@@ -12,6 +12,23 @@ type WorkspacePolicy struct {
 	rootDir string
 }
 
+type WorkspacePathError struct {
+	UserPath string
+	RootDir  string
+	Cause    error
+}
+
+func (e *WorkspacePathError) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("path %q escapes workspace root %q: %v", e.UserPath, e.RootDir, e.Cause)
+	}
+	return fmt.Sprintf("path %q escapes workspace root %q", e.UserPath, e.RootDir)
+}
+
+func (e *WorkspacePathError) Unwrap() error {
+	return e.Cause
+}
+
 func NewWorkspacePolicy(rootDir string) (*WorkspacePolicy, error) {
 	cleanRoot, err := filepath.Abs(rootDir)
 	if err != nil {
@@ -48,7 +65,7 @@ func (p *WorkspacePolicy) ResolvePath(userPath string) (string, error) {
 
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		// 默认禁止仓库外读写；后续如果支持仓库外授权，应从这里扩展。
-		return "", fmt.Errorf("path %q escapes workspace root %q", userPath, p.rootDir)
+		return "", &WorkspacePathError{UserPath: userPath, RootDir: p.rootDir}
 	}
 
 	return cleanTarget, nil

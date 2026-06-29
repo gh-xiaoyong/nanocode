@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -108,6 +109,63 @@ func TestLoadFromWorkspaceUsesAPIKeyEnvFromSettings(t *testing.T) {
 
 	if cfg.APIKey != "env-from-settings" {
 		t.Fatalf("expected api key from api_key_env, got %q", cfg.APIKey)
+	}
+}
+
+func TestLoadFromWorkspaceReturnsTypedMissingAPIKeyError(t *testing.T) {
+	workspace := t.TempDir()
+	writeFile(t, filepath.Join(workspace, settingsFileName), `{"model":{"model":"test-model"}}`)
+
+	_, err := LoadFromWorkspace(workspace)
+	if err == nil {
+		t.Fatal("expected missing API key error")
+	}
+	var configErr *ConfigError
+	if !errors.As(err, &configErr) || configErr.Kind != ConfigErrorMissingAPIKey {
+		t.Fatalf("expected missing API key ConfigError, got %T %v", err, err)
+	}
+}
+
+func TestLoadFromWorkspaceReturnsTypedMissingModelError(t *testing.T) {
+	workspace := t.TempDir()
+	writeFile(t, filepath.Join(workspace, settingsFileName), `{"model":{"api_key":"test-key"}}`)
+
+	_, err := LoadFromWorkspace(workspace)
+	if err == nil {
+		t.Fatal("expected missing model error")
+	}
+	var configErr *ConfigError
+	if !errors.As(err, &configErr) || configErr.Kind != ConfigErrorMissingModel {
+		t.Fatalf("expected missing model ConfigError, got %T %v", err, err)
+	}
+}
+
+func TestLoadFromWorkspaceReturnsTypedSettingsParseError(t *testing.T) {
+	workspace := t.TempDir()
+	writeFile(t, filepath.Join(workspace, settingsFileName), `{"model":`)
+
+	_, err := LoadFromWorkspace(workspace)
+	if err == nil {
+		t.Fatal("expected settings parse error")
+	}
+	var configErr *ConfigError
+	if !errors.As(err, &configErr) || configErr.Kind != ConfigErrorSettingsParse || configErr.Path == "" {
+		t.Fatalf("expected settings parse ConfigError, got %#v", err)
+	}
+}
+
+func TestLoadFromWorkspaceReturnsTypedEnvParseError(t *testing.T) {
+	workspace := t.TempDir()
+	writeFile(t, filepath.Join(workspace, settingsFileName), `{"model":{"api_key":"test-key","model":"test-model"}}`)
+	t.Setenv("NANOCODE_CONTEXT_WINDOW", "not-int")
+
+	_, err := LoadFromWorkspace(workspace)
+	if err == nil {
+		t.Fatal("expected env parse error")
+	}
+	var configErr *ConfigError
+	if !errors.As(err, &configErr) || configErr.Kind != ConfigErrorEnvParse {
+		t.Fatalf("expected env parse ConfigError, got %#v", err)
 	}
 }
 

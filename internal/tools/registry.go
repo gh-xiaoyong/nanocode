@@ -9,6 +9,8 @@ import (
 	"nanocode/internal/permission"
 )
 
+type PreviewFunc func(ctx context.Context, arguments string) (string, error)
+
 // Registry 统一装配工具，并给每个工具标注权限类型和风险说明。
 type Registry struct {
 	workspace   *permission.WorkspacePolicy
@@ -16,9 +18,10 @@ type Registry struct {
 }
 
 type RegisteredTool struct {
-	Tool einotool.BaseTool
-	Kind permission.ToolKind
-	Risk string
+	Tool    einotool.BaseTool
+	Kind    permission.ToolKind
+	Risk    string
+	Preview PreviewFunc
 }
 
 func NewRegistry(workspace *permission.WorkspacePolicy, checkpoints *checkpoint.Manager) *Registry {
@@ -54,12 +57,12 @@ func (r *Registry) Build(ctx context.Context) ([]RegisteredTool, error) {
 		return nil, err
 	}
 
-	writeFileTool, err := newWriteFileTool(r.workspace, r.checkpoints)
+	writeFileTool, writeFilePreview, err := newWriteFileTool(r.workspace, r.checkpoints)
 	if err != nil {
 		return nil, err
 	}
 
-	editFileTool, err := newEditFileTool(r.workspace, r.checkpoints)
+	editFileTool, editFilePreview, err := newEditFileTool(r.workspace, r.checkpoints)
 	if err != nil {
 		return nil, err
 	}
@@ -75,8 +78,8 @@ func (r *Registry) Build(ctx context.Context) ([]RegisteredTool, error) {
 		{Tool: grepTool, Kind: permission.ToolKindRead, Risk: "Search workspace file content"},
 		{Tool: globTool, Kind: permission.ToolKindRead, Risk: "Search workspace files by path pattern"},
 		{Tool: gitStatusTool, Kind: permission.ToolKindRead, Risk: "Read current git status"},
-		{Tool: writeFileTool, Kind: permission.ToolKindWrite, Risk: "Create or overwrite a workspace file"},
-		{Tool: editFileTool, Kind: permission.ToolKindWrite, Risk: "Modify workspace file content"},
+		{Tool: writeFileTool, Kind: permission.ToolKindWrite, Risk: "Create or overwrite a workspace file", Preview: writeFilePreview},
+		{Tool: editFileTool, Kind: permission.ToolKindWrite, Risk: "Modify workspace file content", Preview: editFilePreview},
 		{Tool: bashTool, Kind: permission.ToolKindShell, Risk: "Run a shell command in the workspace; it may have side effects"},
 	}, nil
 }

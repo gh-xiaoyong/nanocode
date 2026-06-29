@@ -17,6 +17,44 @@ const (
 	settingsFileName     = "settings.json"
 )
 
+type ConfigErrorKind string
+
+const (
+	ConfigErrorMissingAPIKey ConfigErrorKind = "missing_api_key"
+	ConfigErrorMissingModel  ConfigErrorKind = "missing_model"
+	ConfigErrorSettingsParse ConfigErrorKind = "settings_parse"
+	ConfigErrorEnvParse      ConfigErrorKind = "env_parse"
+)
+
+type ConfigError struct {
+	Kind  ConfigErrorKind
+	Path  string
+	Field string
+	Cause error
+}
+
+func (e *ConfigError) Error() string {
+	switch e.Kind {
+	case ConfigErrorMissingAPIKey:
+		return "missing API key"
+	case ConfigErrorMissingModel:
+		return "missing model"
+	case ConfigErrorSettingsParse:
+		return fmt.Sprintf("parse settings file %s: %v", e.Path, e.Cause)
+	case ConfigErrorEnvParse:
+		return fmt.Sprintf("parse %s: %v", e.Field, e.Cause)
+	default:
+		if e.Cause != nil {
+			return e.Cause.Error()
+		}
+		return "config error"
+	}
+}
+
+func (e *ConfigError) Unwrap() error {
+	return e.Cause
+}
+
 type ModelConfig struct {
 	BaseURL       string
 	APIKey        string
@@ -80,7 +118,7 @@ func LoadFromWorkspace(workspaceRoot string) (ModelConfig, error) {
 	if raw := envValue("NANOCODE_TEMPERATURE", "OPENAI_TEMPERATURE"); raw != "" {
 		value, parseErr := strconv.ParseFloat(raw, 32)
 		if parseErr != nil {
-			return ModelConfig{}, fmt.Errorf("parse temperature: %w", parseErr)
+			return ModelConfig{}, &ConfigError{Kind: ConfigErrorEnvParse, Field: "temperature", Cause: parseErr}
 		}
 		cfg.Temperature = float32(value)
 	}
@@ -88,7 +126,7 @@ func LoadFromWorkspace(workspaceRoot string) (ModelConfig, error) {
 	if raw := envValue("NANOCODE_MAX_TOKENS", "OPENAI_MAX_TOKENS"); raw != "" {
 		value, parseErr := strconv.Atoi(raw)
 		if parseErr != nil {
-			return ModelConfig{}, fmt.Errorf("parse max tokens: %w", parseErr)
+			return ModelConfig{}, &ConfigError{Kind: ConfigErrorEnvParse, Field: "max tokens", Cause: parseErr}
 		}
 		cfg.MaxTokens = value
 	}
@@ -96,18 +134,18 @@ func LoadFromWorkspace(workspaceRoot string) (ModelConfig, error) {
 	if raw := envValue("NANOCODE_CONTEXT_WINDOW", "OPENAI_CONTEXT_WINDOW"); raw != "" {
 		value, parseErr := strconv.Atoi(raw)
 		if parseErr != nil {
-			return ModelConfig{}, fmt.Errorf("parse context window: %w", parseErr)
+			return ModelConfig{}, &ConfigError{Kind: ConfigErrorEnvParse, Field: "context window", Cause: parseErr}
 		}
 		cfg.ContextWindow = value
 	}
 
 	if strings.TrimSpace(cfg.APIKey) == "" {
-		return ModelConfig{}, fmt.Errorf("missing API key: set it in settings.json or provide NANOCODE_API_KEY / OPENAI_API_KEY")
+		return ModelConfig{}, &ConfigError{Kind: ConfigErrorMissingAPIKey}
 	}
 
 	// model 必须显式指定，避免静默调用到错误模型。
 	if strings.TrimSpace(cfg.Model) == "" {
-		return ModelConfig{}, fmt.Errorf("missing model: set it in settings.json or provide NANOCODE_MODEL / OPENAI_MODEL")
+		return ModelConfig{}, &ConfigError{Kind: ConfigErrorMissingModel}
 	}
 
 	return cfg, nil
@@ -126,7 +164,7 @@ func loadSettingsFile(workspaceRoot string) (modelSettings, error) {
 
 	var cfg fileConfig
 	if err := json.Unmarshal(content, &cfg); err != nil {
-		return modelSettings{}, fmt.Errorf("parse settings file %s: %w", settingsPath, err)
+		return modelSettings{}, &ConfigError{Kind: ConfigErrorSettingsParse, Path: settingsPath, Cause: err}
 	}
 
 	return cfg.Model, nil

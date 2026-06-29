@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	einomodel "github.com/cloudwego/eino/components/model"
 	einotool "github.com/cloudwego/eino/components/tool"
@@ -13,6 +14,7 @@ import (
 	"nanocode/internal/checkpoint"
 	"nanocode/internal/config"
 	"nanocode/internal/contextmgr"
+	"nanocode/internal/friendlyerror"
 	"nanocode/internal/memory"
 	"nanocode/internal/model"
 	"nanocode/internal/permission"
@@ -20,16 +22,17 @@ import (
 	"nanocode/internal/tools"
 )
 
-const maxCoreLoopSteps = 8
+const maxCoreLoopSteps = 50
 
 type SingleTurnRunner struct {
-	// SingleTurnRunner 持有一次 Agent 执行需要的运行时对象：
-	// 模型、工具、权限确认、checkpoint、上下文预算都在这里汇合。
+	// SingleTurnRunner 汇集一次 Agent 执行需要的运行时对象：
+	// 模型、工具、权限确认、checkpoint 和上下文预算都从这里进入显式 loop。
 	model        einomodel.ToolCallingChatModel
 	toolInfos    []*schema.ToolInfo
 	invokers     map[string]einotool.InvokableTool
 	toolMetadata map[string]tools.RegisteredTool
 	systemPrompt string
+	modelLabel   string
 	mode         permission.Mode
 	confirmer    permission.Confirmer
 	checkpoints  *checkpoint.Manager
@@ -98,6 +101,7 @@ func NewSingleTurnRunnerWithRuntime(ctx context.Context, cfg config.ModelConfig,
 		invokers:     invokers,
 		toolMetadata: toolMetadata,
 		systemPrompt: prompt.BuildSystemPrompt(mode, workspacePolicy.RootDir(), loadedMemory),
+		modelLabel:   formatModelLabel(cfg),
 		mode:         mode,
 		confirmer:    confirmer,
 		checkpoints:  checkpoints,
@@ -114,37 +118,77 @@ func (r *SingleTurnRunner) Memory() memory.Memory {
 	return r.memory
 }
 
+func (r *SingleTurnRunner) ContextUsage(messages []*schema.Message) string {
+	if r.contextMgr == nil {
+		return ""
+	}
+	return r.contextMgr.FormatUsage(messages)
+}
+
+func (r *SingleTurnRunner) SystemPrompt() string {
+	return r.systemPrompt
+}
+
+func (r *SingleTurnRunner) ModelLabel() string {
+	return r.modelLabel
+}
+
+func (r *SingleTurnRunner) ToolSummary() map[permission.ToolKind]int {
+	summary := map[permission.ToolKind]int{
+		permission.ToolKindRead:  0,
+		permission.ToolKindWrite: 0,
+		permission.ToolKindShell: 0,
+	}
+	for _, metadata := range r.toolMetadata {
+		summary[metadata.Kind]++
+	}
+	return summary
+}
+
+func formatModelLabel(cfg config.ModelConfig) string {
+	if cfg.BaseURL != "" {
+		return fmt.Sprintf("%s (%s)", cfg.Model, cfg.BaseURL)
+	}
+	return cfg.Model
+}
+
 func (r *SingleTurnRunner) Run(ctx context.Context, userPrompt string, output io.Writer) error {
 	_, err := r.RunWithMessages(ctx, nil, userPrompt, output)
 	return err
 }
 
 func (r *SingleTurnRunner) RunWithMessages(ctx context.Context, history []*schema.Message, userPrompt string, output io.Writer) ([]*schema.Message, error) {
-	// 阶段 5 起，REPL 会把历史 messages 传进来；本轮结束后再把更新后的 messages 保存回 session。
+	// REPL 会把历史 messages 传进来；本轮结束后再保存回 session。
 	messages := r.prepareMessages(history, userPrompt)
+	reporter := NewTerminalReporter(output)
+	stats := StartTurnStats()
 
 	for step := 0; step < maxCoreLoopSteps; step++ {
 		// 每次调模型前先做预算检查，避免工具结果连续回填后把上下文撑爆。
 		messages = r.compactMessages(messages)
+		stats.RecordModelCall()
 		assistantMsg, err := r.streamAssistantMessage(ctx, messages, output)
 		if err != nil {
+			reporter.SystemError(err.Error())
 			return messages, err
 		}
 
 		messages = append(messages, assistantMsg)
 		if len(assistantMsg.ToolCalls) == 0 {
-			if err := r.writeContextUsage(output, messages); err != nil {
+			if err := r.writeTurnFooter(output, messages, stats); err != nil {
 				return messages, err
 			}
 			return messages, nil
 		}
 
 		for _, toolCall := range assistantMsg.ToolCalls {
-			messages = append(messages, r.invokeTool(ctx, toolCall))
+			messages = append(messages, r.invokeTool(ctx, toolCall, reporter, stats))
 		}
 	}
 
-	return messages, fmt.Errorf("core loop reached max steps %d", maxCoreLoopSteps)
+	err := fmt.Errorf("core loop reached max steps %d", maxCoreLoopSteps)
+	reporter.SystemError(err.Error())
+	return messages, err
 }
 
 func (r *SingleTurnRunner) prepareMessages(history []*schema.Message, userPrompt string) []*schema.Message {
@@ -170,9 +214,13 @@ func (r *SingleTurnRunner) compactMessages(messages []*schema.Message) []*schema
 	return result.Messages
 }
 
-func (r *SingleTurnRunner) writeContextUsage(output io.Writer, messages []*schema.Message) error {
-	if _, err := fmt.Fprintf(output, "\n%s", r.contextMgr.FormatUsage(messages)); err != nil {
-		return fmt.Errorf("write context usage: %w", err)
+func (r *SingleTurnRunner) writeTurnFooter(output io.Writer, messages []*schema.Message, stats *TurnStats) error {
+	footer := r.contextMgr.FormatUsage(messages)
+	if stats != nil {
+		footer += " " + stats.FormatTurnStats()
+	}
+	if _, err := fmt.Fprintf(output, "\n%s", footer); err != nil {
+		return fmt.Errorf("write turn footer: %w", err)
 	}
 	return nil
 }
@@ -241,7 +289,7 @@ func filterToolsForMode(mode permission.Mode, registeredTools []tools.Registered
 		return registeredTools
 	}
 
-	// plan mode 不仅执行时拒绝写工具，也在模型可见工具列表里直接隐藏写入和 shell 能力。
+	// plan mode 不仅执行时拒绝写工具，也在模型可见工具列表里隐藏写入和 shell 能力。
 	filtered := make([]tools.RegisteredTool, 0, len(registeredTools))
 	for _, registeredTool := range registeredTools {
 		if registeredTool.Kind == permission.ToolKindRead {
@@ -251,51 +299,104 @@ func filterToolsForMode(mode permission.Mode, registeredTools []tools.Registered
 	return filtered
 }
 
-func (r *SingleTurnRunner) invokeTool(ctx context.Context, toolCall schema.ToolCall) *schema.Message {
+func (r *SingleTurnRunner) invokeTool(ctx context.Context, toolCall schema.ToolCall, reporter Reporter, stats *TurnStats) *schema.Message {
+	if reporter == nil {
+		reporter = NoopReporter{}
+	}
 	toolName := toolCall.Function.Name
 	invoker, ok := r.invokers[toolName]
 	if !ok {
-		return schema.ToolMessage(fmt.Sprintf("tool %q is not registered", toolName), toolCall.ID, schema.WithToolName(toolName))
+		err := fmt.Errorf("tool %q is not registered", toolName)
+		result := friendlyerror.ShortToolError(toolName, err)
+		reporter.ToolError(toolName, toolCall.Function.Arguments, err.Error(), time.Time{})
+		if stats != nil {
+			stats.RecordToolCall(toolName, "")
+			stats.RecordToolError(toolName, "")
+		}
+		return schema.ToolMessage(result, toolCall.ID, schema.WithToolName(toolName))
 	}
 
-	request, err := r.permissionRequest(toolName, toolCall.Function.Arguments)
+	request, err := r.permissionRequest(ctx, toolName, toolCall.Function.Arguments)
 	if err != nil {
-		return schema.ToolMessage(fmt.Sprintf("tool %q failed permission check: %v", toolName, err), toolCall.ID, schema.WithToolName(toolName))
+		result := friendlyerror.ShortToolError(toolName, err)
+		reporter.ToolError(toolName, toolCall.Function.Arguments, err.Error(), time.Time{})
+		if stats != nil {
+			stats.RecordToolCall(toolName, "")
+			stats.RecordToolError(toolName, "")
+		}
+		return schema.ToolMessage(result, toolCall.ID, schema.WithToolName(toolName))
 	}
+	stats.RecordToolCall(toolName, request.Kind)
 
 	decision, err := permission.Evaluate(r.mode, request)
 	if err != nil {
-		return schema.ToolMessage(fmt.Sprintf("tool %q failed permission check: %v", toolName, err), toolCall.ID, schema.WithToolName(toolName))
+		result := friendlyerror.ShortToolError(toolName, err)
+		reporter.ToolError(toolName, toolCall.Function.Arguments, err.Error(), time.Time{})
+		stats.RecordToolError(toolName, request.Kind)
+		return schema.ToolMessage(result, toolCall.ID, schema.WithToolName(toolName))
 	}
 	if decision == permission.DecisionAsk {
 		// default / shell 场景会进入这里，由 REPL 展示具体风险并等待用户确认。
 		decision, err = r.confirmer.Confirm(ctx, request)
 		if err != nil {
-			return schema.ToolMessage(fmt.Sprintf("tool %q permission confirmation failed: %v", toolName, err), toolCall.ID, schema.WithToolName(toolName))
+			result := friendlyerror.ShortToolError(toolName, err)
+			reporter.ToolError(toolName, toolCall.Function.Arguments, err.Error(), time.Time{})
+			stats.RecordToolError(toolName, request.Kind)
+			return schema.ToolMessage(result, toolCall.ID, schema.WithToolName(toolName))
 		}
 	}
 	if decision != permission.DecisionAllow {
-		return schema.ToolMessage(fmt.Sprintf("tool %q was denied by permission policy in %s mode", toolName, r.mode), toolCall.ID, schema.WithToolName(toolName))
+		reason := r.permissionDeniedMessage(toolName, request.Kind, decision)
+		reporter.ToolDenied(toolName, toolCall.Function.Arguments, reason)
+		stats.RecordToolDenied(toolName, request.Kind)
+		return schema.ToolMessage(reason, toolCall.ID, schema.WithToolName(toolName))
 	}
 
+	if toolName == "bash" {
+		// bash 只有真正通过权限并开始执行时才计入运行统计。
+		stats.RecordBashCommand()
+	}
+	startedAt := reporter.ToolStart(toolName, toolCall.Function.Arguments)
 	result, err := invoker.InvokableRun(ctx, toolCall.Function.Arguments)
 	if err != nil {
-		result = fmt.Sprintf("tool %q failed: %v", toolName, err)
+		reporter.ToolError(toolName, toolCall.Function.Arguments, err.Error(), startedAt)
+		stats.RecordToolError(toolName, request.Kind)
+		result = friendlyerror.ShortToolError(toolName, err)
+	} else {
+		reporter.ToolFinish(toolName, toolCall.Function.Arguments, result, request.Preview, startedAt)
+		stats.RecordToolSuccess(toolName, request.Kind)
 	}
 	// 工具自身可能已经截断，Agent 层仍统一兜底，保证 tool_result 不会无限膨胀。
 	result = r.contextMgr.TrimToolResult(toolName, result)
 	return schema.ToolMessage(result, toolCall.ID, schema.WithToolName(toolName))
 }
 
-func (r *SingleTurnRunner) permissionRequest(toolName string, arguments string) (permission.Request, error) {
+func (r *SingleTurnRunner) permissionDeniedMessage(toolName string, kind permission.ToolKind, decision permission.Decision) string {
+	_ = decision
+	_, nonInteractive := r.confirmer.(permission.DenyConfirmer)
+	userDenied := !nonInteractive && r.mode != permission.ModePlan
+	return friendlyerror.FormatPermissionDenied(toolName, r.mode, kind, nonInteractive, userDenied).Summary()
+}
+
+func (r *SingleTurnRunner) permissionRequest(ctx context.Context, toolName string, arguments string) (permission.Request, error) {
 	metadata, ok := r.toolMetadata[toolName]
 	if !ok {
 		return permission.Request{}, fmt.Errorf("missing permission metadata for tool %q", toolName)
 	}
-	return permission.Request{
+	request := permission.Request{
 		ToolName:  toolName,
 		Arguments: arguments,
 		Kind:      metadata.Kind,
 		Risk:      metadata.Risk,
-	}, nil
+	}
+	if r.mode != permission.ModePlan && metadata.Preview != nil {
+		// diff preview 是给终端用户看的确认信息，不会进入 messages[]。
+		preview, err := metadata.Preview(ctx, arguments)
+		if err != nil {
+			request.Preview = fmt.Sprintf("diff 预览不可用：%v", err)
+		} else {
+			request.Preview = preview
+		}
+	}
+	return request, nil
 }

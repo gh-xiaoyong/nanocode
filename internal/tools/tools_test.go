@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,10 @@ func TestResolvePathRejectsEscape(t *testing.T) {
 	_, err = resolvePath(workspace, "..\\outside.txt")
 	if err == nil {
 		t.Fatal("expected resolvePath to reject parent escape")
+	}
+	var pathErr *permission.WorkspacePathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("expected WorkspacePathError, got %T %v", err, err)
 	}
 }
 
@@ -517,7 +522,7 @@ func TestWriteFileToolWritesWorkspaceFile(t *testing.T) {
 		t.Fatalf("create workspace policy: %v", err)
 	}
 
-	baseTool, err := newWriteFileTool(workspace, checkpoint.NewManager())
+	baseTool, _, err := newWriteFileTool(workspace, checkpoint.NewManager())
 	if err != nil {
 		t.Fatalf("create write_file tool: %v", err)
 	}
@@ -547,7 +552,7 @@ func TestWriteFileToolRejectsWorkspaceEscape(t *testing.T) {
 		t.Fatalf("create workspace policy: %v", err)
 	}
 
-	baseTool, err := newWriteFileTool(workspace, checkpoint.NewManager())
+	baseTool, _, err := newWriteFileTool(workspace, checkpoint.NewManager())
 	if err != nil {
 		t.Fatalf("create write_file tool: %v", err)
 	}
@@ -556,6 +561,59 @@ func TestWriteFileToolRejectsWorkspaceEscape(t *testing.T) {
 	_, err = invokableTool.InvokableRun(context.Background(), `{"path":"../outside.txt","content":"nope"}`)
 	if err == nil {
 		t.Fatal("expected write_file to reject workspace escape")
+	}
+}
+
+func TestWriteFilePreviewShowsOverwriteDiff(t *testing.T) {
+	rootDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootDir, "hello.txt"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("write fixture file: %v", err)
+	}
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	_, preview, err := newWriteFileTool(workspace, checkpoint.NewManager())
+	if err != nil {
+		t.Fatalf("create write_file tool: %v", err)
+	}
+
+	diff, err := preview(context.Background(), `{"path":"hello.txt","content":"new\n"}`)
+	if err != nil {
+		t.Fatalf("preview write_file: %v", err)
+	}
+	if !strings.Contains(diff, "-old") || !strings.Contains(diff, "+new") {
+		t.Fatalf("expected overwrite diff, got %q", diff)
+	}
+
+	content, err := os.ReadFile(filepath.Join(rootDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("read fixture file: %v", err)
+	}
+	if string(content) != "old\n" {
+		t.Fatalf("preview should not write file, got %q", string(content))
+	}
+}
+
+func TestWriteFilePreviewShowsNewFileDiff(t *testing.T) {
+	rootDir := t.TempDir()
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	_, preview, err := newWriteFileTool(workspace, checkpoint.NewManager())
+	if err != nil {
+		t.Fatalf("create write_file tool: %v", err)
+	}
+
+	diff, err := preview(context.Background(), `{"path":"hello.txt","content":"hello\n"}`)
+	if err != nil {
+		t.Fatalf("preview write_file: %v", err)
+	}
+	if !strings.Contains(diff, "--- /dev/null") || !strings.Contains(diff, "+hello") {
+		t.Fatalf("expected new file diff, got %q", diff)
 	}
 }
 
@@ -571,7 +629,7 @@ func TestEditFileToolReplacesSingleMatch(t *testing.T) {
 		t.Fatalf("create workspace policy: %v", err)
 	}
 
-	baseTool, err := newEditFileTool(workspace, checkpoint.NewManager())
+	baseTool, _, err := newEditFileTool(workspace, checkpoint.NewManager())
 	if err != nil {
 		t.Fatalf("create edit_file tool: %v", err)
 	}
@@ -594,6 +652,39 @@ func TestEditFileToolReplacesSingleMatch(t *testing.T) {
 	}
 }
 
+func TestEditFilePreviewShowsReplacementDiff(t *testing.T) {
+	rootDir := t.TempDir()
+	filePath := filepath.Join(rootDir, "hello.txt")
+	if err := os.WriteFile(filePath, []byte("hello old value\n"), 0o644); err != nil {
+		t.Fatalf("write fixture file: %v", err)
+	}
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	_, preview, err := newEditFileTool(workspace, checkpoint.NewManager())
+	if err != nil {
+		t.Fatalf("create edit_file tool: %v", err)
+	}
+
+	diff, err := preview(context.Background(), `{"path":"hello.txt","old_string":"old value","new_string":"new value"}`)
+	if err != nil {
+		t.Fatalf("preview edit_file: %v", err)
+	}
+	if !strings.Contains(diff, "-hello old value") || !strings.Contains(diff, "+hello new value") {
+		t.Fatalf("expected replacement diff, got %q", diff)
+	}
+
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read fixture file: %v", err)
+	}
+	if string(content) != "hello old value\n" {
+		t.Fatalf("preview should not write file, got %q", string(content))
+	}
+}
+
 func TestEditFileToolErrorsWhenOldStringMissing(t *testing.T) {
 	rootDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(rootDir, "hello.txt"), []byte("hello"), 0o644); err != nil {
@@ -605,7 +696,7 @@ func TestEditFileToolErrorsWhenOldStringMissing(t *testing.T) {
 		t.Fatalf("create workspace policy: %v", err)
 	}
 
-	baseTool, err := newEditFileTool(workspace, checkpoint.NewManager())
+	baseTool, _, err := newEditFileTool(workspace, checkpoint.NewManager())
 	if err != nil {
 		t.Fatalf("create edit_file tool: %v", err)
 	}
@@ -614,6 +705,27 @@ func TestEditFileToolErrorsWhenOldStringMissing(t *testing.T) {
 	_, err = invokableTool.InvokableRun(context.Background(), `{"path":"hello.txt","old_string":"missing","new_string":"new"}`)
 	if err == nil {
 		t.Fatal("expected edit_file to fail when old_string is missing")
+	}
+}
+
+func TestEditFilePreviewReturnsReadableErrorWhenOldStringMissing(t *testing.T) {
+	rootDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootDir, "hello.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write fixture file: %v", err)
+	}
+	workspace, err := permission.NewWorkspacePolicy(rootDir)
+	if err != nil {
+		t.Fatalf("create workspace policy: %v", err)
+	}
+
+	_, preview, err := newEditFileTool(workspace, checkpoint.NewManager())
+	if err != nil {
+		t.Fatalf("create edit_file tool: %v", err)
+	}
+
+	_, err = preview(context.Background(), `{"path":"hello.txt","old_string":"missing","new_string":"new"}`)
+	if err == nil || !strings.Contains(err.Error(), "old_string was not found") {
+		t.Fatalf("expected readable preview error, got %v", err)
 	}
 }
 
@@ -628,7 +740,7 @@ func TestEditFileToolErrorsOnMultipleMatchesByDefault(t *testing.T) {
 		t.Fatalf("create workspace policy: %v", err)
 	}
 
-	baseTool, err := newEditFileTool(workspace, checkpoint.NewManager())
+	baseTool, _, err := newEditFileTool(workspace, checkpoint.NewManager())
 	if err != nil {
 		t.Fatalf("create edit_file tool: %v", err)
 	}
